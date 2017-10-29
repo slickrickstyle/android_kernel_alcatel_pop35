@@ -947,7 +947,6 @@ static long msm_sensor_subdev_ioctl(struct v4l2_subdev *sd,
 		return 0;
 	case MSM_SD_NOTIFY_FREEZE:
 		return 0;
-	case VIDIOC_MSM_SENSOR_GET_OTP_STATUS:
 #if	TCT_SENSOR_OTP_OPEN
 		printk("%s cmd =%d \n",__func__,cmd);
 		TCT_update_OTP(s_ctrl);

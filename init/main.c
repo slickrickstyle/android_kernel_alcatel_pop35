@@ -82,8 +82,6 @@
 #include <asm/setup.h>
 #include <asm/sections.h>
 #include <asm/cacheflush.h>
-// add by ting.cao for bootprof file
-#include <linux/bootprof.h>
 
 #ifdef CONFIG_X86_LOCAL_APIC
 #include <asm/smp.h>
@@ -826,9 +824,6 @@ static int __ref kernel_init(void *unused)
 	numa_default_policy();
 
 	flush_delayed_fput();
-
-    // add by ting.cao for bootprof file
-    log_boot("Kernel_init_done");
 
 	if (ramdisk_execute_command) {
 		if (!run_init_process(ramdisk_execute_command))
