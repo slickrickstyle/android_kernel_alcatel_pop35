@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -582,6 +582,13 @@ static int mdp3_ctrl_intf_init(struct msm_fb_data_type *mfd,
 	int vsync_period = v_front_porch + v_back_porch + h + v_pulse_width;
 	struct mdp3_session_data *mdp3_session;
 
+	int border_top = p->lcdc.border_top;
+	int border_bottom = p->lcdc.border_bottom;
+	int border_left = p->lcdc.border_left;
+	int border_right = p->lcdc.border_right;
+
+	hsync_period += border_left + border_right;
+	vsync_period += border_top + border_bottom;
 	mdp3_session = (struct mdp3_session_data *)mfd->mdp.private1;
 	vsync_period *= hsync_period;
 
@@ -598,17 +605,18 @@ static int mdp3_ctrl_intf_init(struct msm_fb_data_type *mfd,
 			(v_back_porch + v_pulse_width) * hsync_period;
 		video->display_end_y =
 			vsync_period - v_front_porch * hsync_period - 1;
-		video->active_start_x = video->display_start_x;
-		video->active_end_x = video->display_end_x;
+		video->active_start_x = video->display_start_x + border_left;
+		video->active_end_x = video->display_end_x - border_right;
 		video->active_h_enable = true;
-		video->active_start_y = video->display_start_y;
-		video->active_end_y = video->display_end_y;
+		video->active_start_y = video->display_start_y + (border_top * hsync_period);
+		video->active_end_y = video->display_end_y - (border_bottom * hsync_period);
 		video->active_v_enable = true;
 		video->hsync_skew = h_sync_skew;
 		video->hsync_polarity = 1;
 		video->vsync_polarity = 1;
 		video->de_polarity = 1;
 		video->underflow_color = p->lcdc.underflow_clr;
+		video->border_color = p->lcdc.border_clr;
 	} else if (cfg.type == MDP3_DMA_OUTPUT_SEL_DSI_CMD) {
 		cfg.dsi_cmd.primary_dsi_cmd_id = 0;
 		cfg.dsi_cmd.secondary_dsi_cmd_id = 1;
@@ -862,8 +870,10 @@ static int mdp3_ctrl_off(struct msm_fb_data_type *mfd)
 
 	/* PP related programming for ctrl off */
 	mdp3_histogram_stop(mdp3_session, MDP_BLOCK_DMA_P);
+	mutex_lock(&mdp3_session->dma->pp_lock);
 	mdp3_session->dma->ccs_config.ccs_dirty = false;
 	mdp3_session->dma->lut_config.lut_dirty = false;
+	mutex_unlock(&mdp3_session->dma->pp_lock);
 
 	if (panel->event_handler)
 		rc = panel->event_handler(panel, MDSS_EVENT_BLANK, NULL);
@@ -909,6 +919,7 @@ static int mdp3_ctrl_off(struct msm_fb_data_type *mfd)
 	atomic_set(&mdp3_session->dma_done_cnt, 0);
 	mdp3_session->clk_on = 0;
 	mdp3_session->in_splash_screen = 0;
+	mdp3_res->solid_fill_vote_en = false;
 off_error:
 	mdp3_session->status = 0;
 	mdp3_bufq_deinit(&mdp3_session->bufq_out);
@@ -1669,14 +1680,16 @@ static int mdp3_csc_config(struct mdp3_session_data *session,
 		return -EINVAL;
 	}
 
-	session->cc_vect_sel = (session->cc_vect_sel + 1) % 2;
+	mutex_lock(&session->lock);
+	mutex_lock(&session->dma->pp_lock);
+	session->dma->cc_vect_sel = (session->dma->cc_vect_sel + 1) % 2;
 
 	config.ccs_enable = 1;
-	config.ccs_sel = session->cc_vect_sel;
-	config.pre_limit_sel = session->cc_vect_sel;
-	config.post_limit_sel = session->cc_vect_sel;
-	config.pre_bias_sel = session->cc_vect_sel;
-	config.post_bias_sel = session->cc_vect_sel;
+	config.ccs_sel = session->dma->cc_vect_sel;
+	config.pre_limit_sel = session->dma->cc_vect_sel;
+	config.post_limit_sel = session->dma->cc_vect_sel;
+	config.pre_bias_sel = session->dma->cc_vect_sel;
+	config.post_bias_sel = session->dma->cc_vect_sel;
 	config.ccs_dirty = true;
 
 	ccs.mv = data->csc_data.csc_mv;
@@ -1688,10 +1701,10 @@ static int mdp3_csc_config(struct mdp3_session_data *session,
 	/* cache one copy of setting for suspend/resume reconfiguring */
 	session->dma->ccs_cache = *data;
 
-	mutex_lock(&session->lock);
 	mdp3_clk_enable(1, 0);
 	ret = session->dma->config_ccs(session->dma, &config, &ccs);
 	mdp3_clk_enable(0, 0);
+	mutex_unlock(&session->dma->pp_lock);
 	mutex_unlock(&session->lock);
 	return ret;
 }
@@ -1939,8 +1952,8 @@ static int mdp3_lut_combine_gain(struct fb_cmap *cmap, struct mdp3_dma *dma)
 	return 0;
 }
 
-/* Called from within pp_lock and session lock locked context */
-static int mdp3_ctrl_lut_update_locked(struct msm_fb_data_type *mfd,
+/* Called from within pp_lock locked context */
+static int mdp3_ctrl_lut_update(struct msm_fb_data_type *mfd,
 				struct fb_cmap *cmap)
 {
 	int rc = 0;
@@ -1969,22 +1982,9 @@ static int mdp3_ctrl_lut_update_locked(struct msm_fb_data_type *mfd,
 	rc = dma->config_lut(dma, &lut_config, cmap);
 	mdp3_clk_enable(0, 0);
 	if (rc)
-		pr_err("mdp3_ctrl_lut_update_locked failed\n");
+		pr_err("mdp3_ctrl_lut_update failed\n");
 
 	mdp3_session->lut_sel = (mdp3_session->lut_sel + 1) % 2;
-	return rc;
-}
-
-/* Called from within pp_lock locked context */
-static int mdp3_ctrl_lut_update(struct msm_fb_data_type *mfd,
-				struct fb_cmap *cmap)
-{
-	int rc = 0;
-	struct mdp3_session_data *mdp3_session = mfd->mdp.private1;
-
-	mutex_lock(&mdp3_session->lock);
-	rc = mdp3_ctrl_lut_update_locked(mfd, cmap);
-	mutex_unlock(&mdp3_session->lock);
 	return rc;
 }
 
@@ -2010,7 +2010,8 @@ static int mdp3_ctrl_lut_config(struct msm_fb_data_type *mfd,
 		return -ENOMEM;
 	}
 
-	mutex_lock(&mdp3_session->pp_lock);
+	mutex_lock(&mdp3_session->lock);
+	mutex_lock(&dma->pp_lock);
 	rc = copy_from_user(cmap->red + cfg->cmap.start,
 			cfg->cmap.red, sizeof(u16) * cfg->cmap.len);
 	rc |= copy_from_user(cmap->green + cfg->cmap.start,
@@ -2143,7 +2144,8 @@ static int mdp3_ctrl_lut_config(struct msm_fb_data_type *mfd,
 	if (rc)
 		pr_err("Updating LUT failed! rc = %d\n", rc);
 exit_err:
-	mutex_unlock(&mdp3_session->pp_lock);
+	mutex_unlock(&dma->pp_lock);
+	mutex_unlock(&mdp3_session->lock);
 	mdp3_free_lut_buffer(mfd->pdev, (void **) &cmap);
 	return rc;
 }
@@ -2179,14 +2181,14 @@ static int mdp3_ctrl_lut_read(struct msm_fb_data_type *mfd,
 	cfg->cmap.start = cmap->start;
 	cfg->cmap.len = cmap->len;
 
-	mutex_lock(&mdp3_session->pp_lock);
+	mutex_lock(&dma->pp_lock);
 	rc = copy_to_user(cfg->cmap.red, cmap->red, sizeof(u16) *
 								MDP_LUT_SIZE);
 	rc |= copy_to_user(cfg->cmap.green, cmap->green, sizeof(u16) *
 								MDP_LUT_SIZE);
 	rc |= copy_to_user(cfg->cmap.blue, cmap->blue, sizeof(u16) *
 								MDP_LUT_SIZE);
-	mutex_unlock(&mdp3_session->pp_lock);
+	mutex_unlock(&dma->pp_lock);
 	return rc;
 }
 
@@ -2201,6 +2203,7 @@ static void mdp3_ctrl_pp_resume(struct msm_fb_data_type *mfd)
 	mdp3_session = mfd->mdp.private1;
 	dma = mdp3_session->dma;
 
+	mutex_lock(&dma->pp_lock);
 	/*
 	 * if dma->ccs_config.ccs_enable is set then DMA PP block was enabled
 	 * via user space IOCTL.
@@ -2217,7 +2220,6 @@ static void mdp3_ctrl_pp_resume(struct msm_fb_data_type *mfd)
 	 * histogram processing algorithms will program hardware based on new
 	 * frame data if they are enabled.
 	 */
-	mutex_lock(&mdp3_session->pp_lock);
 	if (dma->lut_sts & MDP3_LUT_GC_EN) {
 
 		rc = mdp3_alloc_lut_buffer(mfd->pdev, (void **)&cmap);
@@ -2240,14 +2242,14 @@ static void mdp3_ctrl_pp_resume(struct msm_fb_data_type *mfd)
 			}
 		}
 
-		rc = mdp3_ctrl_lut_update_locked(mfd, cmap);
+		rc = mdp3_ctrl_lut_update(mfd, cmap);
 		if (rc)
 			pr_err("GC Lut update failed rc=%d\n", rc);
 exit_err:
 		mdp3_free_lut_buffer(mfd->pdev, (void **)&cmap);
 	}
 
-	mutex_unlock(&mdp3_session->pp_lock);
+	mutex_unlock(&dma->pp_lock);
 }
 
 static int mdp3_overlay_prepare(struct msm_fb_data_type *mfd,
@@ -2497,7 +2499,6 @@ int mdp3_ctrl_init(struct msm_fb_data_type *mfd)
 	INIT_WORK(&mdp3_session->dma_done_work, mdp3_dispatch_dma_done);
 	atomic_set(&mdp3_session->vsync_countdown, 0);
 	mutex_init(&mdp3_session->histo_lock);
-	mutex_init(&mdp3_session->pp_lock);
 	mdp3_session->dma = mdp3_get_dma_pipe(MDP3_DMA_CAP_ALL);
 	if (!mdp3_session->dma) {
 		rc = -ENODEV;
