@@ -590,6 +590,10 @@ config JRD_SSR_RECORD
 
 config STATE_NOTIFIER
         bool "State Notifier"
+        
+config STATE_HELPER
+        bool "State Helper"
+	depends on STATE_NOTIFIER
 
 if CPU_FREQ_MSM
 
