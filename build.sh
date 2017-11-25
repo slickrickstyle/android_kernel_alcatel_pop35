@@ -1,6 +1,6 @@
 #!/bin/sh
 export KERNELDIR=`readlink -f .`
-. ~/gcc-4.9-uber_arm-eabi.sh
+export CROSS_COMPILE=/home/slickrickstyle/android/toolchains/arm-eabi-4.8/bin/arm-eabi-
 export ARCH=arm
 if [ ! -f $KERNELDIR/.config ];
 then
