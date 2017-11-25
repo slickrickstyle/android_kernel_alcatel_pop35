@@ -639,12 +639,11 @@ static int ft5x06_report_gesture(struct i2c_client *i2c_client,
 		input_mt_report_slot_state(ip_dev, MT_TOOL_FINGER, 0);
 		input_mt_report_pointer_emulation(ip_dev, false);
 		input_sync(ip_dev);
+return 0;
 	}
 	#endif
 
-	return 0;
-}
-#else
+
 static DEVICE_ATTR(pocket, 0664, NULL, NULL);
 static DEVICE_ATTR(enable, 0664, NULL, NULL);
 
@@ -653,7 +652,6 @@ static int ft5x06_report_gesture(struct i2c_client *i2c_client,
 {
 	return 0;
 }
-#endif
 
 
 #if defined(USB_CHARGE_DETECT)

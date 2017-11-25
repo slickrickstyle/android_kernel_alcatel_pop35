@@ -120,7 +120,6 @@
 			focaltech,fw-upgrade-id2 = <0x18>;
 			focaltech,fw-delay-readid-ms = <10>;
 			focaltech,fw-delay-era-flsh-ms = <2000>;
-            focaltech,gesture-support;
 			focaltech,irq-gpio = <&msm_gpio 13 0x2008>;
 			focaltech,reset-gpio = <&msm_gpio 12 0x0>;
 			focaltech,disable-gpios;
