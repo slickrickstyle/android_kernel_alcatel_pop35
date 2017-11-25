@@ -36,6 +36,7 @@ modules.builtin
 #
 # Top-level generic files
 #
+/BUILT_pixi35
 /tags
 /TAGS
 /linux
