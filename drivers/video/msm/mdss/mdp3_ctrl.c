@@ -21,6 +21,7 @@
 #include <linux/uaccess.h>
 #include <linux/delay.h>
 #include <linux/dma-buf.h>
+#include <linux/pm_runtime.h>
 
 #include "mdp3_ctrl.h"
 #include "mdp3.h"
@@ -481,7 +482,7 @@ static int mdp3_ctrl_res_req_bus(struct msm_fb_data_type *mfd, int status)
 		vtotal = panel_info->yres + panel_info->lcdc.v_back_porch +
 			panel_info->lcdc.v_front_porch +
 			panel_info->lcdc.v_pulse_width;
-		ab = panel_info->xres * vtotal * 4;
+		ab = panel_info->xres * vtotal * ppp_bpp(mfd->fb_imgType);
 		ab *= panel_info->mipi.frame_rate;
 		/* ab and ib vote should be same for honest voting */
 		ib = ab;
@@ -582,13 +583,6 @@ static int mdp3_ctrl_intf_init(struct msm_fb_data_type *mfd,
 	int vsync_period = v_front_porch + v_back_porch + h + v_pulse_width;
 	struct mdp3_session_data *mdp3_session;
 
-	int border_top = p->lcdc.border_top;
-	int border_bottom = p->lcdc.border_bottom;
-	int border_left = p->lcdc.border_left;
-	int border_right = p->lcdc.border_right;
-
-	hsync_period += border_left + border_right;
-	vsync_period += border_top + border_bottom;
 	mdp3_session = (struct mdp3_session_data *)mfd->mdp.private1;
 	vsync_period *= hsync_period;
 
@@ -605,18 +599,17 @@ static int mdp3_ctrl_intf_init(struct msm_fb_data_type *mfd,
 			(v_back_porch + v_pulse_width) * hsync_period;
 		video->display_end_y =
 			vsync_period - v_front_porch * hsync_period - 1;
-		video->active_start_x = video->display_start_x + border_left;
-		video->active_end_x = video->display_end_x - border_right;
+		video->active_start_x = video->display_start_x;
+		video->active_end_x = video->display_end_x;
 		video->active_h_enable = true;
-		video->active_start_y = video->display_start_y + (border_top * hsync_period);
-		video->active_end_y = video->display_end_y - (border_bottom * hsync_period);
+		video->active_start_y = video->display_start_y;
+		video->active_end_y = video->display_end_y;
 		video->active_v_enable = true;
 		video->hsync_skew = h_sync_skew;
 		video->hsync_polarity = 1;
 		video->vsync_polarity = 1;
 		video->de_polarity = 1;
 		video->underflow_color = p->lcdc.underflow_clr;
-		video->border_color = p->lcdc.border_clr;
 	} else if (cfg.type == MDP3_DMA_OUTPUT_SEL_DSI_CMD) {
 		cfg.dsi_cmd.primary_dsi_cmd_id = 0;
 		cfg.dsi_cmd.secondary_dsi_cmd_id = 1;
@@ -768,12 +761,12 @@ static int mdp3_ctrl_on(struct msm_fb_data_type *mfd)
 		goto on_error;
 	}
 
-	mdp3_enable_regulator(true);
-	rc = mdp3_footswitch_ctrl(1);
-	if (rc) {
-		pr_err("fail to enable mdp footswitch ctrl\n");
-		goto on_error;
-	}
+	/*
+	 * Keep a reference to the runtime pm till device is turned
+	 * off, where this reference will be released.
+	 */
+	pm_runtime_get_sync(&mdp3_res->pdev->dev);
+
 	mdp3_ctrl_notifier_register(mdp3_session,
 		&mdp3_session->mfd->mdp_sync_pt_data.notifier);
 
@@ -838,6 +831,7 @@ static int mdp3_ctrl_on(struct msm_fb_data_type *mfd)
 	mdp3_ctrl_pp_resume(mfd);
 on_error:
 	mutex_unlock(&mdp3_session->lock);
+
 	return rc;
 }
 
@@ -912,8 +906,10 @@ static int mdp3_ctrl_off(struct msm_fb_data_type *mfd)
 
 	mdp3_ctrl_notifier_unregister(mdp3_session,
 		&mdp3_session->mfd->mdp_sync_pt_data.notifier);
-	mdp3_enable_regulator(false);
-	mdp3_footswitch_ctrl(0);
+
+	/* Release the pm runtime reference */
+	pm_runtime_put_sync_suspend(&mdp3_res->pdev->dev);
+
 	mdp3_session->vsync_enabled = 0;
 	atomic_set(&mdp3_session->vsync_countdown, 0);
 	atomic_set(&mdp3_session->dma_done_cnt, 0);
@@ -928,6 +924,7 @@ off_error:
 		mdp3_bufq_deinit(&mdp3_session->bufq_in);
 	}
 	mutex_unlock(&mdp3_session->lock);
+
 	return 0;
 }
 
@@ -952,6 +949,7 @@ static int mdp3_ctrl_reset(struct msm_fb_data_type *mfd)
 	mutex_lock(&mdp3_session->lock);
 
 	vsync_client = mdp3_dma->vsync_client;
+
 	rc = mdp3_iommu_enable(MDP3_CLIENT_DMA_P);
 	if (rc) {
 		pr_err("fail to attach dma iommu\n");
@@ -2565,6 +2563,10 @@ int mdp3_ctrl_init(struct msm_fb_data_type *mfd)
 	rc = mdp3_create_sysfs_link(dev);
 	if (rc)
 		pr_warn("problem creating link to mdp sysfs\n");
+
+	/* Enable PM runtime */
+	pm_runtime_set_suspended(&mdp3_res->pdev->dev);
+	pm_runtime_enable(&mdp3_res->pdev->dev);
 
 	kobject_uevent(&dev->kobj, KOBJ_ADD);
 	pr_debug("vsync kobject_uevent(KOBJ_ADD)\n");

@@ -14,7 +14,6 @@
 
 #include "msm8939.dtsi"
 #include "msm8939-cdp.dtsi"
-#include "msm8939-regulator.dtsi"
 
 / {
 	model = "Qualcomm Technologies, Inc. MSM 8939 CDP JDI 5.5-inch A216 FHD";
@@ -30,6 +29,14 @@
 
 &i2c_5 {  /* BLSP1 QUP5 */
 	status = "disabled";
+};
+
+&ts_reset_active {
+	output-high;
+};
+
+&ts_reset_suspend {
+	output-low;
 };
 
 &spi_5 {

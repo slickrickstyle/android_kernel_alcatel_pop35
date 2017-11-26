@@ -852,29 +852,19 @@ config SENSORS_CAPELLA_CM36283
 
 source "drivers/input/misc/pixi35/Kconfig"
 
-source "drivers/input/misc/pixi355/Kconfig"
+# source "drivers/input/misc/pixi355/Kconfig"
 
-# + Cedar.Tan add for product pixi355_tmo,20150521
-source "drivers/input/misc/pixi355_tmo/Kconfig"
-# - Cedar.Tan add for product pixi355_tmo,20150521
+# source "drivers/input/misc/pixi355_tmo/Kconfig"
 
-# + yijun.chen add for product pixi445_tf,20150720
-source "drivers/input/misc/pixi445_tf/Kconfig"
-# - yijun.chen add for product pixi445_tf,20150720
+# source "drivers/input/misc/pixi445_tf/Kconfig"
 
-#[PLATFORM]-Add-BEGIN by TCTNB.ZXZ, RR-876380, 2015/01/03, add stk3311 sensor for pop3
 source "drivers/input/misc/stk3x1x_tct/Kconfig"
-#[PLATFORM]-Add-END by TCTNB.ZXZ
-#[PLATFORM]-Add by TCTNB.ZXZ, RR-966458, 2015/04/02, add KXTJ2-1009 Gsensor
-source "drivers/input/misc/kxtj9_tct/Kconfig"
-#[PLATFORM]-Add-END by TCTNB.ZXZ
-#[PLATFORM]-Add-BEGIN by TCTNB.ZXZ, RR-876617, 2015/01/04, add BMA223 sensor for pop3
-source "drivers/input/misc/bma2x2_tct/Kconfig"
-#[PLATFORM]-Add-END by TCTNB.ZXZ
 
-#[PLATFORM]-Add-BEGIN by TCTNB.ZXZ, FR-966665, 2015/04/27, add ADUX1050 sensor
+source "drivers/input/misc/kxtj9_tct/Kconfig"
+
+source "drivers/input/misc/bma2x2_tct/Kconfig"
+
 source "drivers/input/misc/audx1050/Kconfig"
-#[PLATFORM]-Add-END by TCTNB.ZXZ
 
 endif
 
