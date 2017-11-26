@@ -179,8 +179,7 @@ void mdp3_irq_enable(int type)
 
 	pr_debug("mdp3_irq_enable type=%d\n", type);
 	spin_lock_irqsave(&mdp3_res->irq_lock, flag);
-	mdp3_res->irq_ref_count[type] += 1;
-	if (mdp3_res->irq_ref_count[type] > 1) {
+	if (mdp3_res->irq_ref_count[type] > 0) {
 		pr_debug("interrupt %d already enabled\n", type);
 		spin_unlock_irqrestore(&mdp3_res->irq_lock, flag);
 		return;
@@ -189,6 +188,7 @@ void mdp3_irq_enable(int type)
 	mdp3_res->irq_mask |= BIT(type);
 	MDP3_REG_WRITE(MDP3_REG_INTR_ENABLE, mdp3_res->irq_mask);
 
+	mdp3_res->irq_ref_count[type] += 1;
 	spin_unlock_irqrestore(&mdp3_res->irq_lock, flag);
 }
 
@@ -280,6 +280,7 @@ void mdp3_irq_suspend(void)
 	mdp3_res->irq_ref_cnt--;
 	if (mdp3_res->irq_ref_cnt < 0) {
 		irq_enabled = false;
+		mdp3_res->irq_mask = 0;
 		mdp3_res->irq_ref_cnt = 0;
 	}
 	if (mdp3_res->irq_ref_cnt == 0 && irq_enabled) {
@@ -489,7 +490,8 @@ int mdp3_clk_set_rate(int clk_type, unsigned long clk_rate,
 			if (ret)
 				pr_err("clk_set_rate failed ret=%d\n", ret);
 			else
-				pr_debug("mdp clk rate=%lu\n", rounded_rate);
+				pr_debug("mdp clk rate=%lu, client = %d\n",
+					rounded_rate, client);
 		}
 		mutex_unlock(&mdp3_res->res_mutex);
 	} else {
@@ -587,6 +589,28 @@ static void mdp3_clk_remove(void)
 
 }
 
+u64 mdp3_clk_round_off(u64 clk_rate)
+{
+	u64 clk_round_off = 0;
+
+	if (clk_rate <= MDP_CORE_CLK_RATE_WEARABLE_SVS)
+		clk_round_off = MDP_CORE_CLK_RATE_WEARABLE_SVS;
+	else if (clk_rate <= MDP_CORE_CLK_RATE_WEARABLE_SUPER_SVS)
+		clk_round_off = MDP_CORE_CLK_RATE_WEARABLE_SUPER_SVS;
+	else if (clk_rate <= MDP_CORE_CLK_RATE_WEARABLE_NOM)
+		clk_round_off = MDP_CORE_CLK_RATE_WEARABLE_NOM;
+	else if (clk_rate <= MDP_CORE_CLK_RATE_SVS)
+		clk_round_off = MDP_CORE_CLK_RATE_SVS;
+	else if (clk_rate <= MDP_CORE_CLK_RATE_SUPER_SVS)
+		clk_round_off = MDP_CORE_CLK_RATE_SUPER_SVS;
+	else
+		clk_round_off = MDP_CORE_CLK_RATE_MAX;
+
+	pr_debug("clk = %llu rounded to = %llu\n",
+		clk_rate, clk_round_off);
+	return clk_round_off;
+}
+
 int mdp3_clk_enable(int enable, int dsi_clk)
 {
 	int rc;
@@ -642,6 +666,24 @@ void mdp3_bus_bw_iommu_enable(int enable, int client)
 	if (ref_cnt < 0) {
 		pr_err("Ref count < 0, bus client=%d, ref_cnt=%d",
 				client_idx, ref_cnt);
+	}
+}
+
+void mdp3_calc_dma_res(struct mdss_panel_info *panel_info, u64 *clk_rate,
+		u64 *ab, u64 *ib, uint32_t bpp)
+{
+	u32 vtotal = mdss_panel_get_vtotal(panel_info);
+	u32 htotal = mdss_panel_get_htotal(panel_info, 0);
+	u64 clk    = htotal * vtotal * panel_info->mipi.frame_rate;
+	pr_debug("clk_rate for dma = %llu, bpp = %d\n", clk, bpp);
+
+	if (clk_rate)
+		*clk_rate = mdp3_clk_round_off(clk);
+
+	/* ab and ib vote should be same for honest voting */
+	if (ab || ib) {
+		*ab = clk * bpp;
+		*ib = *ab;
 	}
 }
 
@@ -961,9 +1003,50 @@ int mdp3_dynamic_clock_gating_ctrl(int enable)
 	return rc;
 }
 
+/**
+ * mdp3_get_panic_lut_cfg() - calculate panic and robust lut mask
+ * @panel_width: Panel width
+ *
+ * DMA buffer has 16 fill levels. Which needs to configured as safe
+ * and panic levels based on panel resolutions.
+ * No. of fill levels used = ((panel active width * 8) / 512).
+ * Roundoff the fill levels if needed.
+ * half of the total fill levels used will be treated as panic levels.
+ * Roundoff panic levels if total used fill levels are odd.
+ *
+ * Sample calculation for 720p display:
+ * Fill levels used = (720 * 8) / 512 = 12.5 after round off 13.
+ * panic levels = 13 / 2 = 6.5 after roundoff 7.
+ * Panic mask = 0x3FFF (2 bits per level)
+ * Robust mask = 0xFF80 (1 bit per level)
+ */
+u64 mdp3_get_panic_lut_cfg(u32 panel_width)
+{
+	u32 fill_levels = (((panel_width * 8) / 512) + 1);
+	u32 panic_mask = 0;
+	u32 robust_mask = 0;
+	u32 i = 0;
+	u64 panic_config = 0;
+	u32 panic_levels = 0;
+
+	panic_levels = fill_levels / 2;
+	if (fill_levels % 2)
+		panic_levels++;
+
+	for (i = 0; i < panic_levels; i++) {
+		panic_mask |= (BIT((i * 2) + 1) | BIT(i * 2));
+		robust_mask |= BIT(i);
+	}
+	panic_config = ~robust_mask;
+	panic_config = panic_config << 32;
+	panic_config |= panic_mask;
+	return panic_config;
+}
+
 int mdp3_qos_remapper_setup(struct mdss_panel_data *panel)
 {
 	int rc = 0;
+	u64 panic_config = mdp3_get_panic_lut_cfg(panel->panel_info.xres);
 
 	rc = mdp3_clk_update(MDP3_CLK_AHB, 1);
 	rc |= mdp3_clk_update(MDP3_CLK_AXI, 1);
@@ -981,12 +1064,15 @@ int mdp3_qos_remapper_setup(struct mdss_panel_data *panel)
 	MDP3_REG_WRITE(MDP3_DMA_P_WATERMARK_1, 0x0);
 	MDP3_REG_WRITE(MDP3_DMA_P_WATERMARK_2, 0x0);
 	/* PANIC setting depends on panel width*/
-	if (panel->panel_info.xres >= 720)
-		MDP3_REG_WRITE(MDP3_PANIC_LUT0, 0xFFFF);
-	else
-		MDP3_REG_WRITE(MDP3_PANIC_LUT0, 0x00FF);
+	MDP3_REG_WRITE(MDP3_PANIC_LUT0,	(panic_config & 0xFFFF));
+	MDP3_REG_WRITE(MDP3_PANIC_LUT1, ((panic_config >> 16) & 0xFFFF));
+	MDP3_REG_WRITE(MDP3_ROBUST_LUT, ((panic_config >> 32) & 0xFFFF));
 	MDP3_REG_WRITE(MDP3_PANIC_ROBUST_CTRL, 0x1);
-	MDP3_REG_WRITE(MDP3_ROBUST_LUT, 0xFF00);
+	pr_debug("Panel width %d Panic Lut0 %x Lut1 %x Robust %x\n",
+		panel->panel_info.xres,
+		MDP3_REG_READ(MDP3_PANIC_LUT0),
+		MDP3_REG_READ(MDP3_PANIC_LUT1),
+		MDP3_REG_READ(MDP3_ROBUST_LUT));
 
 	rc = mdp3_clk_update(MDP3_CLK_AHB, 0);
 	rc |= mdp3_clk_update(MDP3_CLK_AXI, 0);
@@ -1693,6 +1779,9 @@ int mdp3_put_img(struct mdp3_img_data *data, int client)
 		if (client == MDP3_CLIENT_DMA_P) {
 			dom = (mdp3_res->domains + MDP3_IOMMU_DOMAIN_UNSECURE)->domain_idx;
 			ion_unmap_iommu(iclient, data->srcp_ihdl, dom, 0);
+			pr_debug("%s DMA_P unmap Addr Start %llx End %llx\n",
+				__func__, (u64)data->addr,
+				(u64)(data->addr + data->len));
 		} else {
 			mdp3_unmap_iommu(iclient, data->srcp_ihdl);
 		}
@@ -1758,6 +1847,9 @@ int mdp3_get_img(struct msmfb_data *img, struct mdp3_img_data *data, int client)
 			dom = (mdp3_res->domains + MDP3_IOMMU_DOMAIN_UNSECURE)->domain_idx;
 			ret = ion_map_iommu(iclient, data->srcp_ihdl, dom,
 					0, SZ_4K, 0, start, len, 0, 0);
+			pr_debug("%s DMA_P map Addr Start %llx End %llx\n",
+				__func__, (u64)data->addr,
+				(u64)(data->addr + data->len));
 		} else {
 			ret = mdp3_self_map_iommu(iclient, data->srcp_ihdl,
 				SZ_4K, data->padding, start, len, 0, 0);
@@ -2121,30 +2213,25 @@ static int mdp3_continuous_splash_on(struct mdss_panel_data *pdata)
 {
 	struct mdss_panel_info *panel_info = &pdata->panel_info;
 	struct mdp3_bus_handle_map *bus_handle;
-	u64 ab, ib;
-	u32 vtotal;
-	int rc;
+	u64 ab = 0;
+	u64 ib = 0;
+	u64 mdp_clk_rate = 0;
+	int rc = 0;
 
 	pr_debug("mdp3__continuous_splash_on\n");
-
-	mdp3_clk_set_rate(MDP3_CLK_VSYNC, MDP_VSYNC_CLK_RATE,
-			MDP3_CLIENT_DMA_P);
-
-	mdp3_clk_set_rate(MDP3_CLK_MDP_SRC, MDP_CORE_CLK_RATE_SVS,
-			MDP3_CLIENT_DMA_P);
 
 	bus_handle = &mdp3_res->bus_handle[MDP3_BUS_HANDLE];
 	if (bus_handle->handle < 1) {
 		pr_err("invalid bus handle %d\n", bus_handle->handle);
 		return -EINVAL;
 	}
-	vtotal = panel_info->yres + panel_info->lcdc.v_back_porch +
-		panel_info->lcdc.v_front_porch +
-		panel_info->lcdc.v_pulse_width;
+	mdp3_calc_dma_res(panel_info, &mdp_clk_rate, &ab, &ib, panel_info->bpp);
 
-	ab = panel_info->xres * vtotal * 4;
-	ab *= panel_info->mipi.frame_rate;
-	ib = ab;
+	mdp3_clk_set_rate(MDP3_CLK_VSYNC, MDP_VSYNC_CLK_RATE,
+			MDP3_CLIENT_DMA_P);
+	mdp3_clk_set_rate(MDP3_CLK_MDP_SRC, mdp_clk_rate,
+			MDP3_CLIENT_DMA_P);
+
 	rc = mdp3_bus_scale_set_quota(MDP3_CLIENT_DMA_P, ab, ib);
 	bus_handle->restore_ab[MDP3_CLIENT_DMA_P] = ab;
 	bus_handle->restore_ib[MDP3_CLIENT_DMA_P] = ib;
@@ -2202,6 +2289,18 @@ static int mdp3_panel_register_done(struct mdss_panel_data *pdata)
 		mdp3_res->allow_iommu_update = true;
 
 	return rc;
+}
+
+/* mdp3_autorefresh_disable() - Disable Auto refresh
+ * @ panel_info : pointer to panel configuration structure
+ *
+ * This function displable Auto refresh block for command mode panel.
+ */
+int mdp3_autorefresh_disable(struct mdss_panel_info *panel_info) {
+	if ((panel_info->type == MIPI_CMD_PANEL) &&
+		(MDP3_REG_READ(MDP3_REG_AUTOREFRESH_CONFIG_P)))
+		MDP3_REG_WRITE(MDP3_REG_AUTOREFRESH_CONFIG_P, 0);
+	return 0;
 }
 
 int mdp3_splash_done(struct mdss_panel_info *panel_info)

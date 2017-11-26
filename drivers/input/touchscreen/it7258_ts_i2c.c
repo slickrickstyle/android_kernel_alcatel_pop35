@@ -99,7 +99,7 @@
 #define FW_WRITE_CHUNK_SIZE		128
 #define FW_WRITE_RETRY_COUNT		4
 #define CHIP_FLASH_SIZE			0x8000
-#define DEVICE_READY_MAX_WAIT		10
+#define DEVICE_READY_MAX_WAIT		500
 
 /* result of reading with BUF_QUERY bits */
 #define CMD_STATUS_BITS			0x07
@@ -167,6 +167,7 @@ struct IT7260_ts_platform_data {
 	unsigned int disp_maxy;
 	unsigned num_of_fingers;
 	unsigned int reset_delay;
+	unsigned int avdd_lpm_cur;
 	bool low_reset;
 };
 
@@ -1114,7 +1115,7 @@ static void IT7260_ts_work_func(struct work_struct *work)
 	pm_relax(&gl_ts->client->dev);
 }
 
-static bool IT7260_chipIdentify(void)
+static int IT7260_chipIdentify(void)
 {
 	static const uint8_t cmd_ident[] = {CMD_IDENT_CHIP};
 	static const uint8_t expected_id[] = {0x0A, 'I', 'T', 'E', '7',
@@ -1126,7 +1127,7 @@ static bool IT7260_chipIdentify(void)
 	if (!IT7260_i2cWriteNoReadyCheck(BUF_COMMAND, cmd_ident,
 							sizeof(cmd_ident))) {
 		dev_err(&gl_ts->client->dev, "failed to write CMD_IDENT_CHIP\n");
-		return false;
+		return -ENODEV;
 	}
 
 	IT7260_waitDeviceReady(false, false);
@@ -1134,7 +1135,7 @@ static bool IT7260_chipIdentify(void)
 	if (!IT7260_i2cReadNoReadyCheck(BUF_RESPONSE, chip_id,
 							sizeof(chip_id))) {
 		dev_err(&gl_ts->client->dev, "failed to read chip-id\n");
-		return false;
+		return -ENODEV;
 	}
 	dev_info(&gl_ts->client->dev,
 		"IT7260_chipIdentify read id: %02X %c%c%c%c%c%c%c %c%c\n",
@@ -1142,7 +1143,7 @@ static bool IT7260_chipIdentify(void)
 		chip_id[5], chip_id[6], chip_id[7], chip_id[8], chip_id[9]);
 
 	if (memcmp(chip_id, expected_id, sizeof(expected_id)))
-		return false;
+		return -EINVAL;
 
 	if (chip_id[8] == '5' && chip_id[9] == '6')
 		dev_info(&gl_ts->client->dev, "rev BX3 found\n");
@@ -1152,7 +1153,7 @@ static bool IT7260_chipIdentify(void)
 		dev_info(&gl_ts->client->dev, "unknown revision (0x%02X 0x%02X) found\n",
 						chip_id[8], chip_id[9]);
 
-	return true;
+	return 0;
 }
 
 static int reg_set_optimum_mode_check(struct regulator *reg, int load_uA)
@@ -1489,6 +1490,14 @@ static int IT7260_parse_dt(struct device *dev,
 		return rc;
 	}
 
+	rc = of_property_read_u32(np, "ite,avdd-lpm-cur", &temp_val);
+	if (!rc) {
+		pdata->avdd_lpm_cur = temp_val;
+	} else if (rc && (rc != -EINVAL)) {
+		dev_err(dev, "Unable to read avdd lpm current value %d\n", rc);
+		return rc;
+	}
+
 	pdata->low_reset = of_property_read_bool(np, "ite,low-reset");
 
 	rc = IT7260_get_dt_coords(dev, "ite,display-coords", pdata);
@@ -1569,7 +1578,7 @@ static int IT7260_ts_probe(struct i2c_client *client,
 	static const uint8_t cmd_start[] = {CMD_UNKNOWN_7};
 	struct IT7260_ts_platform_data *pdata;
 	uint8_t rsp[2];
-	int ret = -1;
+	int ret = -1, err;
 	struct dentry *temp;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
@@ -1641,8 +1650,9 @@ static int IT7260_ts_probe(struct i2c_client *client,
 		}
 	}
 
-	if (!IT7260_chipIdentify()) {
-		dev_err(&client->dev, "Failed to identify chip!!!");
+	ret = IT7260_chipIdentify();
+	if (ret) {
+		dev_err(&client->dev, "Failed to identify chip %d!!!", ret);
 		goto err_identification_fail;
 	}
 
@@ -1768,12 +1778,12 @@ err_identification_fail:
 			devm_pinctrl_put(gl_ts->ts_pinctrl);
 			gl_ts->ts_pinctrl = NULL;
 		} else {
-			ret = pinctrl_select_state(gl_ts->ts_pinctrl,
+			err = pinctrl_select_state(gl_ts->ts_pinctrl,
 					gl_ts->pinctrl_state_release);
-			if (ret)
+			if (err)
 				dev_err(&gl_ts->client->dev,
 					"failed to select relase pinctrl state %d\n",
-					ret);
+					err);
 		}
 	} else {
 		if (gpio_is_valid(pdata->reset_gpio))
@@ -1864,6 +1874,15 @@ static int IT7260_ts_resume(struct device *dev)
 
 	if (device_may_wakeup(dev)) {
 		if (gl_ts->device_needs_wakeup) {
+			/* Set active current for the avdd regulator */
+			if (gl_ts->pdata->avdd_lpm_cur) {
+				retval = reg_set_optimum_mode_check(gl_ts->avdd,
+						IT_I2C_ACTIVE_LOAD_UA);
+				if (retval < 0)
+					dev_err(dev, "Regulator avdd set_opt failed at resume rc=%d\n",
+					retval);
+			}
+
 			gl_ts->device_needs_wakeup = false;
 			disable_irq_wake(gl_ts->client->irq);
 		}
@@ -1901,6 +1920,15 @@ static int IT7260_ts_suspend(struct device *dev)
 		if (!gl_ts->device_needs_wakeup) {
 			/* put the device in low power idle mode */
 			IT7260_ts_chipLowPowerMode(PWR_CTL_LOW_POWER_MODE);
+
+			/* Set lpm current for avdd regulator */
+			if (gl_ts->pdata->avdd_lpm_cur) {
+				retval = reg_set_optimum_mode_check(gl_ts->avdd,
+						gl_ts->pdata->avdd_lpm_cur);
+				if (retval < 0)
+					dev_err(dev, "Regulator avdd set_opt failed at suspend rc=%d\n",
+						retval);
+			}
 
 			gl_ts->device_needs_wakeup = true;
 			enable_irq_wake(gl_ts->client->irq);
