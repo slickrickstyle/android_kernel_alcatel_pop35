@@ -41,6 +41,11 @@
 
 #include <asm/current.h>
 
+#ifdef CONFIG_KEXEC_HARDBOOT
+#include <asm/kexec.h>
+#endif
+
+
 #define DISABLE_SSR 0x9889deed
 /* If set to 0x9889deed, call to subsystem_restart_dev() returns immediately */
 static uint disable_restart_work;
@@ -1013,6 +1018,10 @@ int subsystem_restart_dev(struct subsys_device *dev)
 	module_put(dev->owner);
 	put_device(&dev->dev);
 
+#ifdef CONFIG_KEXEC_HARDBOOT
+	kexec_hardboot_hook = msm_kexec_hardboot_hook;
+#endif
+
 	return 0;
 }
 EXPORT_SYMBOL(subsystem_restart_dev);
@@ -1743,6 +1752,15 @@ err_bus:
 	return ret;
 }
 arch_initcall(subsys_restart_init);
+
+#ifdef CONFIG_KEXEC_HARDBOOT
+static void msm_kexec_hardboot_hook(void)
+{
+	// Set PMIC to restart-on-poweroff
+	pm8xxx_reset_pwr_off(1);
+}
+#endif
+
 
 MODULE_DESCRIPTION("Subsystem Restart Driver");
 MODULE_LICENSE("GPL v2");

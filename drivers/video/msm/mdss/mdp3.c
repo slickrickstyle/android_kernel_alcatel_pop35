@@ -2275,10 +2275,17 @@ static void mdp3_debug_deinit(struct platform_device *pdev)
 
 static void mdp3_dma_underrun_intr_handler(int type, void *arg)
 {
+	struct mdp3_dma *dma = &mdp3_res->dma[MDP3_DMA_P];
+
 	mdp3_res->underrun_cnt++;
-	pr_err("display underrun detected count=%d\n",
+	pr_err_ratelimited("display underrun detected count=%d\n",
 			mdp3_res->underrun_cnt);
 	ATRACE_INT("mdp3_dma_underrun_intr_handler", mdp3_res->underrun_cnt);
+
+	if (dma->ccs_config.ccs_enable && !dma->ccs_config.ccs_dirty) {
+		dma->ccs_config.ccs_dirty = true;
+		schedule_work(&dma->underrun_work);
+	}
 }
 
 static ssize_t mdp3_show_capabilities(struct device *dev,

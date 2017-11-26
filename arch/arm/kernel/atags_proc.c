@@ -4,18 +4,40 @@
 #include <asm/types.h>
 #include <asm/page.h>
 
+/*
+ * [PATCH] Backport arch/arm/kernel/atags.c from 3.10
+ *
+ * There is a bug in older kernels, causing kexec-tools binary to
+ * only read first 1024 bytes from /proc/atags. I guess the bug is
+ * somewhere in /fs/proc/, since I don't think the callback in atags.c
+ * does something wrong. It might affect all procfs files using that
+ * old read callback instead of fops. Doesn't matter though, since it
+ * was accidentally fixed when 3.10 removed it.
+ *
+ * This might have no particular effect on real devices, because the
+ * atags _might_ be organized "just right", but it might be very hard
+ * to track down on a device where it causes problems.
+ *
+ */
+
 struct buffer {
 	size_t size;
 	char data[];
 };
 
+static struct buffer* atags_buffer = NULL;
+
 static ssize_t atags_read(struct file *file, char __user *buf,
 			  size_t count, loff_t *ppos)
 {
-	struct buffer *b = PDE_DATA(file_inode(file));
+	// These are introduced in kernel 3.10. I don't want to backport
+	// the whole chunk, and other things (ram_console) use static
+	// variable to keep data too, so I guess it's okay.
+	//struct buffer *b = PDE_DATA(file_inode(file));
+	struct buffer *b = atags_buffer;
 	return simple_read_from_buffer(buf, count, ppos, b->data, b->size);
-}
-
+ }
+ 
 static const struct file_operations atags_fops = {
 	.read = atags_read,
 	.llseek = default_llseek,
@@ -63,6 +85,8 @@ static int __init init_atags_procfs(void)
 	tags_entry = proc_create_data("atags", 0400, NULL, &atags_fops, b);
 	if (!tags_entry)
 		goto nomem;
+
+	atags_buffer = b;
 
 	return 0;
 
