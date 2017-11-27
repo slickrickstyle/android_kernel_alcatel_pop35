@@ -4847,7 +4847,7 @@ static int msm8x16_wcd_spmi_probe(struct spmi_device *spmi)
 	msm8x10_ear_power_hac_init(&spmi->dev);
 #endif
 	modem_state = apr_get_modem_state();
-	if (modem_state != APR_SUBSYS_LOADED) {
+	if (modem_state == APR_SUBSYS_DOWN) {
 		dev_dbg(&spmi->dev, "Modem is not loaded yet %d\n",
 				modem_state);
 		return -EPROBE_DEFER;
