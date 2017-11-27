@@ -1,4 +1,4 @@
- /* Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+ /* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -22,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/workqueue.h>
 #include <linux/sched.h>
+#include <linux/input.h>
 #include <sound/core.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
@@ -57,26 +58,13 @@
 #define WCD_MBHC_DEF_RLOADS 5
 
 #define LPASS_CSR_GP_LPAIF_PRI_PCM_PRI_MODE_MUXSEL 0x07702008
+
 #define MAX_AUX_CODECS	2
 
 enum btsco_rates {
 	RATE_8KHZ_ID,
 	RATE_16KHZ_ID,
 };
-
-#if 1//Added by li-peng@tcl.com, 20150325, 10:12, for external speaker PA(aw8736).
-#define AW8736_MODE_CTRL
-/*speaker external class D PA*/
-/*It takes about 13 ms for Class-D PA to ramp-up*/
-#define EXT_CLASS_D_EN_DELAY 13000
-#define EXT_CLASS_D_DIS_DELAY 3000
-#define EXT_CLASS_D_DELAY_DELTA 2000
-#endif
-
-#define AUDIO_JACK_SWITCH //Addeb by li-peng@tcl.com, 2015/03/30, 19:19, for audio jack switch control.
-#ifdef AUDIO_JACK_SWITCH
-static int audio_jack_switch_gpio = -1;
-#endif
 
 static int msm_btsco_rate = BTSCO_RATE_8KHZ;
 static int msm_btsco_ch = 1;
@@ -98,7 +86,11 @@ static int msm8x16_enable_extcodec_ext_clk(struct snd_soc_codec *codec,
 static int conf_int_codec_mux(struct msm8916_asoc_mach_data *pdata);
 
 static void *def_tasha_mbhc_cal(void);
-
+/*
+ * Android L spec
+ * Need to report LINEIN
+ * if R/L channel impedance is larger than 5K ohm
+ */
 static struct wcd_mbhc_config mbhc_cfg = {
 	.read_fw_bin = false,
 	.calibration = NULL,
@@ -106,6 +98,15 @@ static struct wcd_mbhc_config mbhc_cfg = {
 	.mono_stero_detection = false,
 	.swap_gnd_mic = NULL,
 	.hs_ext_micbias = false,
+	.key_code[0] = KEY_MEDIA,
+	.key_code[1] = KEY_VOICECOMMAND,
+	.key_code[2] = KEY_VOLUMEUP,
+	.key_code[3] = KEY_VOLUMEDOWN,
+	.key_code[4] = 0,
+	.key_code[5] = 0,
+	.key_code[6] = 0,
+	.key_code[7] = 0,
+	.linein_th = 5000,
 };
 
 static struct wcd_mbhc_config wcd_mbhc_cfg = {
@@ -385,57 +386,11 @@ static int msm_auxpcm_be_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	return 0;
 }
 
-#ifdef  AW8736_MODE_CTRL
-/* 0.75us<TL<10us; 0.75us<TH<10us */
-#define GAP (2) //unit: us
-#define AW8736_MODE1(gpio, on) /*1.2w*/ \
-    gpio_direction_output(gpio, on)
-
-#define AW8736_MODE2(gpio, on) /*1.0w*/ \
-    do { \
-        gpio_direction_output(gpio, on); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, !(on)); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, on); \
-    } while(0)
-
-#define AW8736_MODE3(gpio, on) /*0.8w*/ \
-    do { \
-        gpio_direction_output(gpio, on); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, !(on)); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, on); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, !(on)); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, on); \
-    } while(0)
-
-#define AW8736_MODE4(gpio, on) /*it depends on THD, range: 1.5 ~ 2.0w*/ \
-    do { \
-        gpio_direction_output(gpio, on); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, !(on)); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, on); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, !(on)); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, on); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, !(on)); \
-        udelay(GAP); \
-        gpio_direction_output(gpio, on); \
-    } while(0)
-#endif
-
 static int enable_spk_ext_pa(struct snd_soc_codec *codec, int enable)
 {
 	struct snd_soc_card *card = codec->card;
 	struct msm8916_asoc_mach_data *pdata = snd_soc_card_get_drvdata(card);
-	unsigned long min, max;
+	int ret = 0;
 
 	if (!gpio_is_valid(pdata->spk_ext_pa_gpio)) {
 		pr_err("%s: Invalid gpio: %d\n", __func__,
@@ -445,30 +400,17 @@ static int enable_spk_ext_pa(struct snd_soc_codec *codec, int enable)
 
 	pr_debug("%s: %s external speaker PA\n", __func__,
 		enable ? "Enable" : "Disable");
-
-#if 0//Modified by li-peng@tcl.com, 20150325, 11:38, for external speaker PA(aw8736)
-	gpio_set_value_cansleep(pdata->spk_ext_pa_gpio, enable);
-#else
-	if (enable) {
-		min = EXT_CLASS_D_EN_DELAY;
-		max = EXT_CLASS_D_EN_DELAY + EXT_CLASS_D_DELAY_DELTA;
-#ifdef  AW8736_MODE_CTRL
-		AW8736_MODE3(pdata->spk_ext_pa_gpio, 1);
-#endif
-	} else {
-		min = EXT_CLASS_D_DIS_DELAY;
-		max = EXT_CLASS_D_DIS_DELAY + EXT_CLASS_D_DELAY_DELTA;
-#ifdef  AW8736_MODE_CTRL
-		gpio_direction_output(pdata->spk_ext_pa_gpio, 0);
-#endif
+	ret = pinctrl_select_state(pinctrl_info.pinctrl,
+				pinctrl_info.cdc_lines_act);
+	if (ret < 0) {
+		pr_err("%s: failed to active cdc gpio's\n",
+				__func__);
+		return -EINVAL;
 	}
-#ifndef  AW8736_MODE_CTRL
-	gpio_direction_output(pdata->spk_ext_pa_gpio, enable);
-#endif
-	usleep_range(min, max);
-#endif
 
-	 return 0;
+	gpio_set_value_cansleep(pdata->spk_ext_pa_gpio, enable);
+
+	return 0;
 }
 
 static int msm_pri_rx_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
@@ -1024,61 +966,6 @@ static int msm_btsco_rate_put(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-#ifdef AUDIO_JACK_SWITCH
-/* SWITCH_ON_HIGH: indicates the output level of audio jack switch gpio when 
- * enable the headphone path.
- * 1: outputs HIGH to enable the headphone path;
- * 0: outputs LOW to enable the headphone path. */
-#define SWITCH_ON_HIGH 0
-
-static int audio_jack_switch_get(struct snd_kcontrol *kcontrol,
-				struct snd_ctl_elem_value *ucontrol)
-{
-	int gpio_output;
-
-	gpio_output = gpio_get_value_cansleep(audio_jack_switch_gpio);
-	ucontrol->value.integer.value[0] = SWITCH_ON_HIGH ? !!gpio_output : !gpio_output;
-	pr_debug("%s: gpio: %d, on_off:gpio_output = (%ld:%d)\n", 
-		__func__, audio_jack_switch_gpio, ucontrol->value.integer.value[0], gpio_output);
-
-	return 0;
-}
-
-static int audio_jack_switch_put(struct snd_kcontrol *kcontrol,
-				struct snd_ctl_elem_value *ucontrol)
-{
-	int ret = -1;
-	int val = ucontrol->value.integer.value[0];
-	int gpio_output = SWITCH_ON_HIGH ? val : !val;
-	u8 reg_val = 0;
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-	struct msm8x16_wcd *msm8x16 = codec->control_data;
-
-	/* As QTI's suggestion, when switch off headphone path, disable the 100k 
-	 * pull-down resister fo headphone left pin, that's, set MBHC_DET_CTL_2[0] to 0.*/
-	ret = msm8x16->read_dev(codec, 0x150);//reg address: 0x1F150
-	if(ret < 0) {
-		pr_err("%s read MBHC_DET_CTL_2 error: %d\n", __func__, ret);
-	}
-	reg_val = (u8)ret;
-	if(val) {
-		reg_val = reg_val | (1 << 0);
-	}else {
-		reg_val = reg_val & ~(1 << 0);
-	}
-	ret = msm8x16->write_dev(codec, 0x150, reg_val);
-	if(ret < 0) {
-		pr_err("%s write MBHC_DET_CTL_2 error: %d\n", __func__, ret);
-	}
-
-	gpio_direction_output(audio_jack_switch_gpio, gpio_output);
-	pr_debug("%s: gpio: %d, on_off:gpio_output = (%d:%d), MBHC_DET_CTL_2: 0x%x\n", 
-		__func__, audio_jack_switch_gpio, val, gpio_output, reg_val);
-
-	return 0;
-}
-#endif
-
 static const struct soc_enum msm_snd_enum[] = {
 	SOC_ENUM_SINGLE_EXT(2, rx_bit_format_text),
 	SOC_ENUM_SINGLE_EXT(4, mi2s_tx_ch_text),
@@ -1091,13 +978,6 @@ static const struct soc_enum msm_btsco_enum[] = {
 	SOC_ENUM_SINGLE_EXT(2, btsco_rate_text),
 };
 
-#ifdef AUDIO_JACK_SWITCH
-static const char *const audio_jack_switch_text[] = {"Off", "On"};
-static const struct soc_enum audio_jack_switch_enum[] = {
-	SOC_ENUM_SINGLE_EXT(2, audio_jack_switch_text),
-};
-#endif
-
 static const struct snd_kcontrol_new msm_snd_controls[] = {
 	SOC_ENUM_EXT("MI2S_RX Format", msm_snd_enum[0],
 			mi2s_rx_bit_format_get, mi2s_rx_bit_format_put),
@@ -1109,10 +989,6 @@ static const struct snd_kcontrol_new msm_snd_controls[] = {
 			loopback_mclk_get, loopback_mclk_put),
 	SOC_ENUM_EXT("Internal BTSCO SampleRate", msm_btsco_enum[0],
 		     msm_btsco_rate_get, msm_btsco_rate_put),
-#ifdef AUDIO_JACK_SWITCH
-	SOC_ENUM_EXT("Audio Jack Switch", audio_jack_switch_enum[0], 
-		     audio_jack_switch_get, audio_jack_switch_put),
-#endif
 
 };
 
@@ -1741,8 +1617,7 @@ static int msm_audrx_init(struct snd_soc_pcm_runtime *rtd)
 			return ret;
 		}
 	}
-
-	return 0;
+	return msm8x16_wcd_hs_detect(codec, &mbhc_cfg);
 }
 
 static int msm_audrx_init_wcd(struct snd_soc_pcm_runtime *rtd)
@@ -1837,6 +1712,20 @@ static struct snd_soc_dai_link msm8x16_9326_dai[] = {
 		.be_hw_params_fixup = msm_pri_rx_be_hw_params_fixup,
 		.ops = &msm8x16_mi2s_be_ops,
 		.ignore_suspend = 1,
+	},
+	{ /* FrontEnd DAI Link, CPE Service */
+		.name = "CPE Listen service",
+		.stream_name = "CPE Listen Audio Service",
+		.cpu_dai_name = "msm-dai-q6-mi2s.3",
+		.platform_name = "msm-cpe-lsm",
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			SND_SOC_DPCM_TRIGGER_POST},
+		.no_host_mode = SND_SOC_DAI_LINK_NO_HOST,
+		.ignore_suspend = 1,
+		.ignore_pmdown_time = 1,
+		.codec_dai_name = "tasha_mad1",
+		.codec_name = "tasha_codec",
+		.ops = &msm8x16_quat_mi2s_be_ops,
 	},
 };
 
@@ -1934,7 +1823,18 @@ static struct snd_soc_dai_link msm8x16_wcd_dai[] = {
 		.ops = &msm8x16_mi2s_be_ops,
 		.ignore_suspend = 1,
 	},
-	/* Backend I2S DAI Links */
+	{
+		.name = LPASS_BE_INT_BT_A2DP_RX,
+		.stream_name = "Internal BT-A2DP Playback",
+		.cpu_dai_name = "msm-dai-q6-dev.12290",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-rx",
+		.no_pcm = 1,
+		.be_id = MSM_BACKEND_DAI_INT_BT_A2DP_RX,
+		.be_hw_params_fixup = msm_bta2dp_be_hw_params_fixup,
+		.ignore_suspend = 1,
+	},
 };
 
 /* Digital audio interface glue - connects codec <---> CPU */
@@ -2396,19 +2296,6 @@ static struct snd_soc_dai_link msm8x16_dai[] = {
 		.be_hw_params_fixup = msm_btsco_be_hw_params_fixup,
 		.ignore_suspend = 1,
 	},
-	{
-		.name = LPASS_BE_INT_BT_A2DP_RX,
-		.stream_name = "Internal BT-A2DP Playback",
-		.cpu_dai_name = "msm-dai-q6-dev.12290",
-		.platform_name = "msm-pcm-routing",
-		.codec_name = "msm-stub-codec.1",
-		.codec_dai_name = "msm-stub-rx",
-		.no_pcm = 1,
-		.be_id = MSM_BACKEND_DAI_INT_BT_A2DP_RX,
-		.be_hw_params_fixup = msm_bta2dp_be_hw_params_fixup,
-		.ignore_suspend = 1,
-	},
-
 	{
 		.name = LPASS_BE_INT_FM_RX,
 		.stream_name = "Internal FM Playback",
@@ -2976,9 +2863,6 @@ static int msm8x16_asoc_machine_probe(struct platform_device *pdev)
 	const char *ext_pa = "qcom,msm-ext-pa";
 	const char *mclk = "qcom,msm-mclk-freq";
 	const char *spk_ext_pa = "qcom,msm-spk-ext-pa";
-#ifdef AUDIO_JACK_SWITCH
-	const char *audio_jack_switch = "qcom,msm-audio-jack-switch";
-#endif
 	const char *ptr = NULL;
 	const char *type = NULL;
 	const char *ext_pa_str = NULL;
@@ -3050,23 +2934,9 @@ static int msm8x16_asoc_machine_probe(struct platform_device *pdev)
 		if (!gpio_is_valid(pdata->spk_ext_pa_gpio)) {
 			pr_err("%s: Invalid external speaker gpio: %d",
 				__func__, pdata->spk_ext_pa_gpio);
-			goto err;
+			return -EINVAL;
 		}
 	}
-#ifdef AUDIO_JACK_SWITCH
-	audio_jack_switch_gpio = of_get_named_gpio(pdev->dev.of_node,
-				audio_jack_switch, 0);
-	if (audio_jack_switch_gpio < 0) {
-		dev_dbg(&pdev->dev,
-			"%s: missing %s in dt node\n", __func__, audio_jack_switch);
-	} else {
-		if (!gpio_is_valid(audio_jack_switch_gpio)) {
-			pr_err("%s: Invalid audio jack switch gpio: %d",
-				__func__, audio_jack_switch_gpio);
-			goto err;
-		}
-	}
-#endif
 
 	ret = of_property_read_string(pdev->dev.of_node, codec_type, &ptr);
 	if (ret) {
