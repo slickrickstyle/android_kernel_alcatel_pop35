@@ -1,13 +1,13 @@
 #!/bin/sh
 export KERNELDIR=`readlink -f .`
-export CROSS_COMPILE=/home/slickrickstyle/android/toolchains/arm-eabi-4.8/bin/arm-eabi-
+export CROSS_COMPILE=/home/slickrickstyle/android/toolchains/linaro-arm-linux-gnueabi-4.9/bin/arm-linux-gnueabi-
 export ARCH=arm
 if [ ! -f $KERNELDIR/.config ];
 then
-  make defconfig lineage-pop35_defconfig
+  make defconfig test-pop35_defconfig
 fi
 . $KERNELDIR/.config
-mv .git .git-halt
+# mv .git .git-halt
 echo "Clearing DTB files ..."
 rm $KERNELDIR/arch/arm/boot/dts/*.dtb
 echo "Cross-compiling kernel ..."
@@ -28,6 +28,6 @@ cd $KERNELDIR/tools/dtbtool; make
 echo ""
 echo "Generating Device Tree image (dt.img) ..."
 $KERNELDIR/tools/dtbtool/dtbtool -o $KERNELDIR/BUILT_pixi35/dt.img -s 2048 -p $KERNELDIR/scripts/dtc/ $KERNELDIR/arch/arm/boot/dts/ && rm $KERNELDIR/tools/dtbtool/dtbtool
-cd $KERNELDIR/; mv .git-halt .git
+cd $KERNELDIR/; # mv .git-halt .git
 echo ""
 echo "BUILT_pixi35 is ready."
